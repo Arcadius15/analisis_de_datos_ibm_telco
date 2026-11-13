@@ -9,11 +9,13 @@
 
 ## 1. Resumen
 
-Este proyecto desarrolla un modelo predictivo de abandono (*churn*) para una empresa de telecomunicaciones. El objetivo es **identificar a los clientes con mayor probabilidad de cancelar sus servicios** para priorizar acciones de retención.
+Este proyecto desarrolla un modelo predictivo de abandono (*churn*) para una empresa de telecomunicaciones. El objetivo es **identificar a los clientes con mayor riesgo de cancelar sus servicios** para priorizar acciones de retención.
 
-Se compararon cinco algoritmos de clasificación bajo el mismo esquema de validación. El mejor resultado lo obtuvo **XGBoost**, con una *average precision* de **0,664** en el conjunto de prueba y una cobertura del **52,1 % de los abandonos** al contactar al 20 % de la cartera con mayor riesgo. **Random Forest** logró el mejor F1 con umbral ajustado (0,630) y un recall alto (0,767), mientras que la **regresión logística** quedó muy cerca en capacidad predictiva (AP 0,633) y ofrece la mayor interpretabilidad.
+La evaluación se separó en tres conjuntos: **60 % entrenamiento, 20 % validación y 20 % prueba**. El modelo y el umbral se eligieron con validación; prueba se usó una sola vez para confirmar el resultado.
 
-Un hallazgo relevante es que **KNN obtuvo la mayor accuracy (0,774) pero la menor average precision (0,611)**: elegir por accuracy habría seleccionado el modelo menos útil para detectar abandonos.
+**XGBoost** fue seleccionado en validación (average precision **0,648**) y confirmó el primer lugar en prueba (**0,657**). Al contactar al 20 % de la cartera con mayor riesgo, cubre el **50,8 % de los abandonos** (lift **2,54×**). **Random Forest** quedó muy cerca (AP de prueba 0,651) y obtuvo el mejor F1 con umbral ajustado (0,629). La **regresión logística** fue competitiva en validación (0,643) y ofrece la mayor interpretabilidad.
+
+La accuracy resultó poco informativa: KNN y la regresión logística tienen valores casi iguales (0,768 y 0,769), pero sus AP difieren de forma apreciable (0,610 y 0,627). El árbol de decisión alcanzó el mayor recall (0,797), a costa de una precision baja (0,469).
 
 El código y los resultados completos están en `telco_churn.ipynb`. Este documento explica el problema, las decisiones metodológicas, los resultados y las conclusiones.
 
@@ -42,6 +44,7 @@ Desarrollar un modelo predictivo de Machine Learning que permita clasificar a lo
 - La unidad de análisis es **un cliente** y la variable objetivo es `Churn` (abandona / no abandona).
 - El conjunto es **transversal**: no contiene fechas ni una ventana temporal explícita. El modelo estima el riesgo de un cliente con características similares a las observadas; **no demuestra una predicción “a 30 días”**.
 - Se identifican **asociaciones predictivas**, no relaciones causales.
+- Las salidas de `predict_proba` se usan como **puntuaciones de riesgo**. Al usar pesos de clase no puede suponerse que estén calibradas como probabilidades frecuentistas.
 
 ---
 
@@ -93,18 +96,20 @@ El trabajo sigue las etapas de **CRISP-DM**: comprensión del negocio, comprensi
 
 ### 4.2 Esquema de evaluación
 
-1. **Partición estratificada 80/20**: 80 % para entrenamiento y validación, 20 % para prueba.
-2. **Validación cruzada estratificada de 5 particiones** sobre el entrenamiento.
-3. **Métrica principal: average precision (AP)**, área bajo la curva precisión–recall. Es más informativa que ROC-AUC cuando hay desbalance.
-4. **Métricas complementarias:** recall, precision, F1, ROC-AUC y accuracy.
-5. **Ajuste del umbral** con predicciones *out-of-fold* del entrenamiento.
-6. **Evaluación final única** sobre el 20 % de prueba, que no participa en ninguna decisión.
+1. **Partición estratificada 60/20/20**:
+   - **Entrenamiento (60 %):** ajuste de hiperparámetros con validación cruzada de 5 particiones.
+   - **Validación (20 %):** selección del modelo y ajuste del umbral.
+   - **Prueba (20 %):** evaluación final, una sola vez.
+2. **Métrica principal: average precision (AP)**. Es un resumen no interpolado de la curva precisión–recall: pondera la precision en cada umbral por el incremento de recall. No es el área trapezoidal de la curva.
+3. **Métricas complementarias:** recall, precision, F1, ROC-AUC y accuracy.
+4. **Ajuste del umbral** maximizando F1 sobre validación.
+5. **Evaluación final** sobre prueba, sin cambiar el modelo ni el umbral después de verla.
 
 ### 4.3 Prevención de fuga de información
 
-Toda imputación, codificación y estandarización se aprende **dentro de cada partición de entrenamiento** mediante `Pipeline` y `ColumnTransformer`. Si se imputara o escalara antes de dividir, el modelo vería información del conjunto de prueba y las métricas serían artificialmente optimistas.
+Toda imputación, codificación y estandarización se aprende **dentro de cada partición de entrenamiento** mediante `Pipeline` y `ColumnTransformer`.
 
-La partición se realiza **antes del análisis exploratorio y de cualquier transformación**.
+La partición se realiza **antes del análisis exploratorio y de cualquier transformación**. El conjunto de prueba no participa en la selección de variables, hiperparámetros, modelo ni umbral.
 
 ---
 
@@ -138,19 +143,21 @@ El notebook contiene 22 celdas de código, organizadas en 17 bloques temáticos.
 ### 6.1 Depuración
 
 1. **`TotalCharges`**: se convierte a numérico. Los 11 faltantes se imputan con **0** dentro del pipeline, no con la mediana, porque corresponden a clientes nuevos sin facturación acumulada.
-2. **`customerID`**: se excluye de los predictores. Es un identificador único sin poder predictivo.
-3. **`Churn`**: se convierte a 0/1.
-4. **Sin eliminación de filas**: se conservan los 7.043 clientes.
-5. **Categorías `No internet service`**: son información válida, no valores faltantes; se conservan como categoría.
+2. **Validación de la regla:** un `assert` comprueba que **todos** los faltantes tengan `tenure = 0`. Si apareciera un faltante con antigüedad mayor, el proceso se detiene para revisarlo.
+3. **`customerID`**: se excluye de los predictores. Es un identificador único sin poder predictivo.
+4. **`Churn`**: se convierte a 0/1.
+5. **Sin eliminación de filas**: se conservan los 7.043 clientes.
+6. **Categorías `No internet service`**: son información válida, no valores faltantes; se conservan como categoría.
 
 ### 6.2 Partición
 
-| Subconjunto | Clientes | Tasa de abandono |
-|---|---:|---:|
-| Entrenamiento | 5.634 | 26,54 % |
-| Prueba | 1.409 | 26,54 % |
+| Subconjunto | Clientes | Tasa de abandono | Uso |
+|---|---:|---:|---|
+| Entrenamiento | 4.225 | 26,53 % | Ajuste de hiperparámetros |
+| Validación | 1.409 | 26,54 % | Selección de modelo y umbral |
+| Prueba | 1.409 | 26,54 % | Evaluación final |
 
-La estratificación conserva la proporción de clases en ambos subconjuntos.
+La estratificación conserva la proporción de clases en los tres subconjuntos.
 
 ### 6.3 Análisis exploratorio (solo entrenamiento)
 
@@ -158,19 +165,19 @@ Se comparan **tasas de abandono**, no solo conteos: un segmento grande puede acu
 
 | Variable | Categoría | Tasa de abandono |
 |---|---|---:|
-| Contrato | Mes a mes | **42,7 %** |
-| | Un año | 11,1 % |
-| | Dos años | 2,9 % |
-| Internet | Fibra óptica | **42,1 %** |
+| Contrato | Mes a mes | **43,1 %** |
+| | Un año | 10,8 % |
+| | Dos años | 2,5 % |
+| Internet | Fibra óptica | **42,3 %** |
 | | DSL | 18,7 % |
-| | Sin internet | 7,2 % |
-| Método de pago | Cheque electrónico | **45,7 %** |
-| | Cheque enviado | 19,3 % |
+| | Sin internet | 7,3 % |
+| Método de pago | Cheque electrónico | **45,6 %** |
+| | Cheque enviado | 19,5 % |
 | | Transferencia automática | 16,2 % |
-| | Tarjeta automática | 14,9 % |
+| | Tarjeta automática | 15,1 % |
 | Soporte técnico | No | **41,8 %** |
-| | Sí | 15,2 % |
-| | Sin internet | 7,2 % |
+| | Sí | 15,0 % |
+| | Sin internet | 7,3 % |
 
 Además:
 
@@ -196,7 +203,7 @@ La estandarización es imprescindible para KNN y regresión logística, y no per
 - **XGBoost:** `scale_pos_weight` con la proporción de negativos y positivos del entrenamiento.
 - **KNN:** no admite ponderación por clase; se compensa con el ajuste del umbral.
 
-Además, para todos los modelos se ajusta el umbral de decisión en validación. El desbalance no se resuelve solo con pesos: también se decide **a partir de qué probabilidad se alerta a un cliente**.
+Además, para todos los modelos se ajusta el umbral de decisión en validación. El desbalance no se resuelve solo con pesos: también se decide **a partir de qué puntuación se alerta a un cliente**.
 
 ---
 
@@ -217,81 +224,84 @@ La línea base “siempre no abandona” alcanza 73,5 % de accuracy con recall 0
 
 ### 7.2 Hiperparámetros seleccionados
 
-| Modelo | Mejores hiperparámetros | Tiempo de ajuste |
-|---|---|---:|
-| Regresión logística | `C = 1,0` | 5,1 s |
-| KNN | `n_neighbors = 31`, `weights = uniform` | 0,8 s |
-| Árbol de decisión | `max_depth = 7`, `min_samples_leaf = 20` | 0,6 s |
-| Random Forest | `max_depth = 8`, `min_samples_leaf = 5` | 13,5 s |
-| XGBoost | `max_depth = 3`, `learning_rate = 0,05` | 7,8 s |
+| Modelo | Mejores hiperparámetros |
+|---|---|
+| Regresión logística | `C = 10,0` |
+| KNN | `n_neighbors = 31`, `weights = uniform` |
+| Árbol de decisión | `max_depth = 7`, `min_samples_leaf = 20` |
+| Random Forest | `max_depth = 8`, `min_samples_leaf = 5` |
+| XGBoost | `max_depth = 3`, `learning_rate = 0,05` |
 
-### 7.3 Validación cruzada (5 particiones)
+En la validación cruzada del entrenamiento, XGBoost y Random Forest quedaron prácticamente empatados (AP 0,670 y 0,670), seguidos por regresión logística (0,665), KNN (0,623) y árbol de decisión (0,617).
 
-| Modelo | AP | ROC-AUC | Recall | Precision | F1 | Accuracy |
+### 7.3 Validación y selección del modelo
+
+| Modelo | AP | ROC-AUC | Recall @0,5 | Precision @0,5 | F1 @0,5 | Accuracy @0,5 |
 |---|---:|---:|---:|---:|---:|---:|
-| **XGBoost** | **0,668 ± 0,021** | 0,847 ± 0,011 | 0,791 ± 0,025 | 0,522 ± 0,011 | 0,629 ± 0,015 | 0,752 ± 0,008 |
-| Random Forest | 0,662 ± 0,018 | **0,848 ± 0,009** | 0,793 ± 0,024 | 0,525 ± 0,016 | **0,632 ± 0,015** | 0,755 ± 0,012 |
-| Regresión logística | 0,660 ± 0,020 | 0,846 ± 0,012 | **0,801 ± 0,038** | 0,517 ± 0,019 | 0,628 ± 0,023 | 0,748 ± 0,015 |
-| Árbol de decisión | 0,620 ± 0,016 | 0,817 ± 0,010 | 0,780 ± 0,022 | 0,507 ± 0,032 | 0,614 ± 0,028 | 0,739 ± 0,025 |
-| KNN | 0,620 ± 0,012 | 0,835 ± 0,009 | 0,583 ± 0,022 | **0,621 ± 0,023** | 0,601 ± 0,021 | **0,795 ± 0,011** |
+| **XGBoost** | **0,648** | 0,838 | 0,765 | 0,517 | 0,617 | 0,748 |
+| Regresión logística | 0,643 | 0,837 | 0,786 | 0,512 | 0,620 | 0,744 |
+| Random Forest | 0,638 | 0,838 | 0,786 | 0,510 | 0,619 | 0,743 |
+| Árbol de decisión | 0,601 | 0,818 | 0,773 | 0,495 | 0,603 | 0,730 |
+| KNN | 0,595 | 0,824 | 0,561 | 0,621 | 0,590 | 0,793 |
 
-Las métricas de recall, precision, F1 y accuracy corresponden al umbral 0,5.
+**XGBoost fue seleccionado por tener la mayor AP en validación.** La regresión logística quedó a solo 0,005 y Random Forest a 0,010. El conjunto de prueba no participó en esta decisión.
 
-> El modelo se ajustó y luego se volvió a validar sobre el mismo entrenamiento. Esto puede producir un leve optimismo en las cifras de validación; el conjunto de prueba confirma el resultado.
+### 7.4 Umbral ajustado en validación
 
-### 7.4 Umbral ajustado
+Se eligió, para cada modelo, el umbral que maximiza F1 en validación:
 
-Se eligió, para cada modelo, el umbral que maximiza F1 sobre las predicciones *out-of-fold*:
-
-| Modelo | Umbral | F1 (OOF) | Recall (OOF) | Precision (OOF) |
+| Modelo | Umbral | F1 (validación) | Recall (validación) | Precision (validación) |
 |---|---:|---:|---:|---:|
-| Regresión logística | 0,576 | 0,638 | 0,743 | 0,558 |
-| XGBoost | 0,585 | 0,636 | 0,718 | 0,571 |
-| Random Forest | 0,531 | 0,636 | 0,767 | 0,544 |
-| KNN | 0,452 | 0,623 | 0,668 | 0,584 |
-| Árbol de decisión | 0,525 | 0,615 | 0,761 | 0,516 |
+| Random Forest | 0,578 | 0,638 | 0,727 | 0,568 |
+| Regresión logística | 0,616 | 0,637 | 0,701 | 0,584 |
+| XGBoost | 0,603 | 0,633 | 0,693 | 0,583 |
+| KNN | 0,419 | 0,624 | 0,701 | 0,562 |
+| Árbol de decisión | 0,472 | 0,611 | 0,824 | 0,485 |
+
+Maximizar F1 es un criterio académico. En una aplicación real, el umbral debería fijarse según la capacidad de contacto y los costos de retención.
 
 ### 7.5 Evaluación final en prueba
 
 | Modelo | AP | ROC-AUC | Recall* | Precision* | F1* | Accuracy* |
 |---|---:|---:|---:|---:|---:|---:|
-| **XGBoost** | **0,664** | **0,845** | 0,719 | 0,552 | 0,625 | 0,771 |
-| Random Forest | 0,651 | 0,843 | **0,767** | 0,534 | **0,630** | 0,761 |
-| Regresión logística | 0,633 | 0,842 | 0,725 | 0,539 | 0,618 | 0,762 |
-| Árbol de decisión | 0,625 | 0,825 | **0,770** | 0,507 | 0,611 | 0,740 |
-| KNN | 0,611 | 0,831 | 0,652 | **0,565** | 0,605 | **0,774** |
+| **XGBoost** | **0,657** | 0,841 | 0,701 | 0,563 | 0,625 | 0,776 |
+| Regresión logística | 0,627 | **0,842** | 0,703 | 0,551 | 0,618 | 0,769 |
+| Random Forest | 0,651 | **0,842** | 0,719 | 0,559 | **0,629** | 0,775 |
+| Árbol de decisión | 0,600 | 0,822 | **0,797** | 0,469 | 0,591 | 0,707 |
+| KNN | 0,610 | 0,830 | 0,693 | 0,550 | 0,613 | 0,768 |
 
 \* Umbral ajustado en validación.
 
 **Lectura:**
 
-- El orden por capacidad de discriminación es **XGBoost > Random Forest > regresión logística > árbol de decisión > KNN**.
-- **KNN tiene la mayor accuracy (0,774) pero la menor AP (0,611) y el menor recall con umbral (0,652).** Es el ejemplo más claro de por qué la accuracy engaña.
-- Los tres primeros modelos tienen un desempeño muy similar; las diferencias son pequeñas frente a la variabilidad entre particiones (±0,02).
+- **XGBoost confirma el primer lugar en prueba** (AP 0,657), seguido por Random Forest (0,651) y regresión logística (0,627).
+- **Random Forest** logra el mejor F1 (0,629) y un recall alto (0,719), con precision 0,559.
+- **El árbol de decisión** alcanza el mayor recall (0,797), pero con precision 0,469: alerta a muchos clientes que no abandonan.
+- **KNN** tiene accuracy 0,768, similar a la regresión logística (0,769), pero su AP es menor (0,610 frente a 0,627). La accuracy no distingue bien entre modelos.
 
-### 7.6 Capacidad operativa: top 20 % de riesgo
+### 7.6 Capacidad operativa: mismos 282 clientes para todos
 
-Si el equipo de retención contacta al **20 % de la cartera con mayor probabilidad estimada**:
+Se contacta exactamente al **20 % de la cartera de prueba**: **282 de 1.409 clientes**, para todos los modelos. La selección se hace ordenando por puntuación; el desempate es estable.
 
-| Modelo | Contactados | Abandonos detectados | Cobertura | Precision en el grupo | Lift vs. azar |
-|---|---:|---:|---:|---:|---:|
-| **XGBoost** | 282 | 195 | **52,1 %** | **69,1 %** | **2,61×** |
-| Random Forest | 282 | 190 | 50,8 % | 67,4 % | 2,54× |
-| KNN | 286 | 189 | 50,5 % | 66,1 % | 2,53× |
-| Regresión logística | 282 | 186 | 49,7 % | 66,0 % | 2,49× |
-| Árbol de decisión | 282 | 184 | 49,2 % | 65,2 % | 2,46× |
+| Modelo | Abandonos detectados | Cobertura | Precision en el grupo | Lift vs. azar |
+|---|---:|---:|---:|---:|
+| **XGBoost** | **190** | **50,8 %** | **67,4 %** | **2,54×** |
+| Regresión logística | 188 | 50,3 % | 66,7 % | 2,51× |
+| Random Forest | 186 | 49,7 % | 66,0 % | 2,49× |
+| KNN | 183 | 48,9 % | 64,9 % | 2,45× |
+| Árbol de decisión | 176 | 47,1 % | 62,4 % | 2,35× |
 
-XGBoost detecta **195 de los 374 abandonos** del conjunto de prueba contactando a 282 clientes (20,0 % de la cartera): **2,6 veces más que una selección aleatoria**.
+XGBoost detecta **190 de los 374 abandonos** del conjunto de prueba con 282 contactos. Es **2,54 veces más** que una selección aleatoria del mismo tamaño.
 
-KNN mejora en este corte fijo porque concentra bien el extremo superior de riesgo, pero su AP global y su recall con umbral siguen siendo los más bajos.
+La diferencia entre XGBoost, regresión logística y Random Forest es pequeña (190, 188 y 186 abandonos). Con una sola partición no puede afirmarse que sea una ventaja estable.
 
 ### 7.7 Curvas y matrices de confusión
 
-- Las curvas **ROC** de XGBoost, Random Forest y regresión logística son prácticamente indistinguibles (AUC 0,842–0,845); árbol y KNN quedan por debajo (0,825 y 0,831).
-- Las curvas **precisión–recall** separan con más claridad a XGBoost (AP 0,664) de KNN (0,611), que es la métrica principal.
-- En las matrices de confusión con umbral ajustado, Random Forest detecta 287 de los 374 abandonos (recall 0,767), con 250 falsos positivos; XGBoost detecta 269 (recall 0,719), con 218 falsos positivos.
+- Las curvas **ROC** de XGBoost, Random Forest y regresión logística son prácticamente indistinguibles (AUC 0,841–0,842); árbol y KNN quedan por debajo (0,822 y 0,830).
+- Las curvas **precisión–recall** separan mejor a XGBoost (AP 0,657) de KNN (0,610) y del árbol (0,600).
+- En las matrices con umbral ajustado, el árbol detecta cerca del 80 % de los abandonos, pero con menos de la mitad de sus alertas correctas. XGBoost detecta alrededor del 70 %, con una precision cercana al 56 %.
 
-> En esta ejecución, el umbral ajustado de XGBoost (0,585) elevó la precision de 0,525 a 0,552, pero redujo el recall de 0,789 a 0,719; el F1 en prueba no mejoró (0,625 frente a 0,630). El umbral elegido en validación no garantiza una mejora en datos nuevos y debe revisarse con el área de retención.
+El umbral ajustado de XGBoost en validación (0,603) produjo en prueba un recall de 0,701 y una precision de 0,563. No se modificó después de ver estos resultados.
 
 ### 7.8 Interpretación de variables
 
@@ -300,25 +310,25 @@ KNN mejora en este corte fijo porque concentra bien el extremo superior de riesg
 | Variable | Importancia |
 |---|---:|
 | `Contract_Month-to-month` | 0,152 |
-| `tenure` | 0,120 |
-| `TotalCharges` | 0,082 |
-| `OnlineSecurity_No` | 0,074 |
-| `Contract_Two year` | 0,070 |
-| `TechSupport_No` | 0,057 |
-| `MonthlyCharges` | 0,056 |
-| `InternetService_Fiber optic` | 0,050 |
+| `tenure` | 0,123 |
+| `TotalCharges` | 0,083 |
+| `Contract_Two year` | 0,076 |
+| `OnlineSecurity_No` | 0,073 |
+| `TechSupport_No` | 0,053 |
+| `MonthlyCharges` | 0,053 |
+| `InternetService_Fiber optic` | 0,049 |
 
 **Regresión logística: coeficientes condicionales**
 
 | Mayor riesgo | Coeficiente | Menor riesgo | Coeficiente |
 |---|---:|---|---:|
-| `InternetService_Fiber optic` | +0,716 | `tenure` | −1,141 |
-| `Contract_Month-to-month` | +0,663 | `Contract_Two year` | −0,766 |
-| `TotalCharges` | +0,474 | `MonthlyCharges` | −0,677 |
-| `StreamingMovies_Yes` | +0,283 | `InternetService_DSL` | −0,618 |
-| | | `OnlineBackup_No internet service` | −0,270 |
+| `InternetService_Fiber optic` | +1,162 | `MonthlyCharges` | −1,581 |
+| `Contract_Month-to-month` | +0,722 | `tenure` | −1,271 |
+| `TotalCharges` | +0,612 | `InternetService_DSL` | −0,944 |
+| `StreamingTV_Yes` | +0,499 | `Contract_Two year` | −0,899 |
+| `StreamingMovies_Yes` | +0,472 | `InternetService_No` | −0,460 |
 
-**Precaución interpretativa:** los coeficientes son **condicionales**. `tenure`, `MonthlyCharges` y `TotalCharges` están fuertemente correlacionadas y `TotalCharges ≈ tenure × MonthlyCharges`; al controlar por las otras variables, el signo de `MonthlyCharges` puede invertirse (efecto de supresión). Además, las categorías `No internet service` de varios servicios son colineales entre sí. Por eso:
+**Precaución interpretativa:** los coeficientes son **condicionales**. `tenure`, `MonthlyCharges` y `TotalCharges` están fuertemente correlacionadas y `TotalCharges ≈ tenure × MonthlyCharges`; al controlar por las otras variables, el signo de `MonthlyCharges` puede invertirse (efecto de supresión). Por eso:
 
 - Los coeficientes describen el comportamiento del modelo, **no efectos causales aislados**.
 - La importancia de Random Forest se basa en impureza y favorece variables continuas o de alta cardinalidad; sirve como orientación, no como prueba de causalidad.
@@ -332,18 +342,19 @@ KNN mejora en este corte fijo porque concentra bien el extremo superior de riesg
 
 **XGBoost es la recomendación principal** para priorizar clientes según su riesgo de abandono:
 
-- Mayor **average precision** en prueba (0,664).
-- Mejor **ROC-AUC** (0,845).
-- Mayor **cobertura de abandonos en el top 20 %** (52,1 %, lift 2,61×).
-- Buen equilibrio recall/precision con umbral ajustado (0,719 / 0,552).
+- Fue seleccionado por la mayor **average precision en validación** (0,648).
+- Confirmó el primer lugar en **prueba** (AP 0,657).
+- Obtuvo la mayor **cobertura de abandonos en el top 20 %** (50,8 %, lift 2,54×).
+- Presentó un equilibrio razonable entre recall (0,701) y precision (0,563) con el umbral ajustado.
 
-Sin embargo, la evidencia no muestra una superioridad contundente:
+La evidencia no muestra una superioridad contundente:
 
-- **Random Forest** es la alternativa más cercana: AP 0,651, el mejor F1 con umbral ajustado (0,630) y un recall de 0,767. Si el objetivo es maximizar cobertura sin sacrificar demasiado la precision, es una elección defendible; el árbol de decisión logra un recall apenas mayor (0,770), pero con peor precision (0,507) y F1 (0,611).
-- **Regresión logística** queda a solo 0,031 de AP del primer lugar y ofrece coeficientes interpretables, bajo costo de mantenimiento y facilidad para explicar cada alerta. Si la interpretabilidad es un requisito, es una opción muy razonable.
-- **Árbol de decisión** y **KNN** quedan por debajo en AP y no se justifican frente a los tres anteriores para este problema.
+- **Random Forest** es la alternativa más cercana: AP de prueba 0,651, el mejor F1 (0,629) y recall 0,719. Si se prioriza cobertura con un F1 competitivo, es una elección defendible.
+- **Regresión logística** quedó a solo 0,005 de AP en validación y ofrece coeficientes interpretables, bajo costo de mantenimiento y facilidad para explicar cada alerta. En prueba quedó más atrás (0,627), pero sigue siendo una opción razonable si la interpretabilidad es requisito.
+- **Árbol de decisión** logra el mayor recall (0,797), pero su precision (0,469) y su AP (0,600) son bajas; generaría muchas alertas innecesarias.
+- **KNN** tiene una AP de 0,610 y no supera a los tres primeros en ningún criterio relevante para retención.
 
-Con una sola partición de prueba, las diferencias entre los tres primeros (0,013 a 0,031 de AP) son del mismo orden que la variabilidad observada en validación cruzada (±0,02). Por eso **no corresponde afirmar una superioridad estadísticamente concluyente**: XGBoost es el mejor candidato con la evidencia disponible, pero Random Forest y la regresión logística son alternativas válidas. Una validación repetida o temporal permitiría decidir con mayor solidez.
+Con una sola partición de validación y otra de prueba, las diferencias entre los tres primeros son pequeñas: 0,005–0,010 de AP en validación y 0,006–0,030 en prueba. No se realizó una prueba de significancia estadística. Por eso **XGBoost es el mejor candidato con la evidencia disponible, pero no puede afirmarse una superioridad concluyente**. Una validación repetida o temporal permitiría decidir con mayor solidez.
 
 ### 8.2 Limitaciones
 
@@ -351,16 +362,18 @@ Con una sola partición de prueba, las diferencias entre los tres primeros (0,01
 2. **Asociación, no causalidad:** los coeficientes y las importancias describen el modelo, no el efecto de intervenir una variable.
 3. **Desbalance moderado:** el 26,5 % de abandonos obliga a usar AP, recall y umbrales ajustados; la accuracy sola sería engañosa.
 4. **Umbral dependiente del negocio:** el umbral óptimo cambia si cambia el costo de contactar o el valor de retener.
-5. **Sin validación temporal:** un despliegue real debería entrenarse con datos históricos y evaluarse con clientes posteriores.
-6. **Variables limitadas:** el conjunto no incluye interacciones con el servicio, reclamos, competencia ni contexto económico.
-7. **Una sola partición de prueba:** los resultados tienen variabilidad; conviene validación repetida o temporal antes de decidir.
+5. **Calibración:** las puntuaciones no están calibradas; no deben interpretarse como probabilidades exactas de abandono.
+6. **Sin validación temporal:** un despliegue real debería entrenarse con datos históricos y evaluarse con clientes posteriores.
+7. **Una sola partición de validación y prueba:** los resultados tienen variabilidad; conviene validación repetida o temporal antes de decidir.
+8. **Variables limitadas:** el conjunto no incluye interacciones con el servicio, reclamos, competencia ni contexto económico.
 
 ### 8.3 Recomendaciones
 
 - Usar el modelo como **priorizador de campañas de retención**, no como decisión automática de cancelación.
-- Revisar el umbral con el área de retención según su capacidad operativa: con 20 % de la cartera se cubre algo más de la mitad de los abandonos.
+- Revisar el umbral con el área de retención según su capacidad operativa: con 20 % de la cartera se cubre aproximadamente la mitad de los abandonos.
 - Reentrenar periódicamente y monitorear la deriva de los datos.
 - Complementar con experimentos o análisis causales antes de concluir que una acción evita el abandono.
+- Si se requiere comunicación de probabilidades, evaluar una etapa de calibración y validarla con datos posteriores.
 
 ---
 
@@ -373,20 +386,20 @@ Con una sola partición de prueba, las diferencias entre los tres primeros (0,01
 | 1 | Configuración e importaciones |
 | 2 | Carga y revisión inicial |
 | 3 | Depuración |
-| 4 | Partición estratificada |
+| 4 | Partición 60/20/20 |
 | 5 | Análisis exploratorio |
 | 6 | Preparación de variables |
 | 7 | Modelos y grillas |
 | 8 | Línea base |
-| 9 | Ajuste y validación cruzada |
+| 9 | Ajuste y validación |
 | 10 | Ajuste del umbral |
 | 11 | Evaluación en prueba |
-| 12 | Capacidad operativa (top 20 %) |
+| 12 | Capacidad operativa (282 clientes) |
 | 13 | Curvas ROC y precisión–recall |
 | 14 | Matrices de confusión |
 | 15 | Coeficientes de la regresión logística |
 | 16 | Importancia de variables en Random Forest |
-| 17 | Ranking final y recomendación |
+| 17 | Resumen: selección y confirmación |
 
 ---
 
@@ -398,5 +411,6 @@ Con una sola partición de prueba, las diferencias entre los tres primeros (0,01
 - Hastie, T., Tibshirani, R., & Friedman, J. (2009). *The elements of statistical learning* (2nd ed.). Springer.
 - Hosmer, D. W., Lemeshow, S., & Sturdivant, R. X. (2013). *Applied logistic regression* (3rd ed.). Wiley.
 - IBM. (2015). *Telco Customer Churn* [Conjunto de datos]. Kaggle. https://www.kaggle.com/datasets/blastchar/telco-customer-churn
+- Niculescu-Mizil, A., & Caruana, R. (2005). Predicting good probabilities with supervised learning. *Proceedings of the 22nd International Conference on Machine Learning*, 625–632.
 - Pedregosa, F., et al. (2011). Scikit-learn: Machine learning in Python. *Journal of Machine Learning Research, 12*, 2825–2830.
 - Saito, T., & Rehmsmeier, M. (2015). The precision-recall plot is more informative than the ROC plot when evaluating binary classifiers on imbalanced datasets. *PLoS ONE, 10*(3), e0118432.
